@@ -138,7 +138,6 @@ def estimate_affine(kp1, kp2, matches):
     A = np.array(A, dtype=float)
     B = np.array(B, dtype=float)
 
-    # Solve for the six affine parameters.
     params, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
 
     a, b, c, d, e, f = params
@@ -186,11 +185,9 @@ def estimate_homography(source, target):
              x * yp, y * yp, yp
         ]
 
-    # Find the unit-length parameter vector minimizing ||A_hom @ p||^2
     _, _, Vt = np.linalg.svd(A_hom)
     p = Vt[-1, :]
 
-    # Construct the homography matrix from all 9 parameters
     H_estimated = p.reshape(3, 3)
 
     return H_estimated
