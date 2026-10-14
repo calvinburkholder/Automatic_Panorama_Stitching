@@ -24,29 +24,44 @@ def detect_features(image):
 def match_descriptors(desc1, desc2, r):
     if desc1 is None or desc2 is None:
         return []
-    if len(desc2) < 2:
+
+    if len(desc1) < 2 or len(desc2) < 2:
         return []
 
+    # Find the two nearest neighbors in image 2 for each descriptor in image 1.
+    forward_matches = {}
+
+    for i, descriptor1 in enumerate(desc1):
+        distances = np.linalg.norm(desc2 - descriptor1, axis=1)
+        nearest = np.argsort(distances)[:2]
+
+        first_idx, second_idx = nearest
+        d1 = distances[first_idx]
+        d2 = distances[second_idx]
+
+        if d2 > 0 and d1 / d2 < r:
+            forward_matches[i] = int(first_idx)
+
+    # Find each descriptor in image 2's nearest descriptor in image 1.
+    reverse_best = {}
+
+    for j, descriptor2 in enumerate(desc2):
+        distances = np.linalg.norm(desc1 - descriptor2, axis=1)
+        reverse_best[j] = int(np.argmin(distances))
+
+    # Keep only matches that agree in both directions.
     matches = []
-    for i, descriptor1  in enumerate(desc1):
-        differences = desc2 - descriptor1
-        distances = np.sqrt(np.sum(differences ** 2, axis=1))
 
-        nearest_indices = np.argsort(distances)[:2]
-
-        first_index = nearest_indices[0]
-        second_index = nearest_indices[1]
-
-        d1 = distances[first_index]
-        d2 = distances[second_index]
-
-        if d2 > 0 and d1/d2 < r:
-            match = cv2.DMatch(
-                _queryIdx = i,
-                _trainIdx = int(first_index),
-                _distance = float(d1)
+    for i, j in forward_matches.items():
+        if reverse_best[j] == i:
+            distance = float(np.linalg.norm(desc1[i] - desc2[j]))
+            matches.append(
+                cv2.DMatch(
+                    _queryIdx=i,
+                    _trainIdx=j,
+                    _distance=distance
+                )
             )
-            matches.append(match)
 
     return matches
 
@@ -111,7 +126,7 @@ img2 = Image.open("Project2_SampleImages/dvd_right.png")
 kp1, desc1 = detect_features(img1)
 kp2, desc2 = detect_features(img2)
 
-matches = match_descriptors(desc1, desc2, .75)
+matches = match_descriptors(desc1, desc2, .6)
 print("Keypoints in image 1:", len(kp1))
 print("Keypoints in image 2:", len(kp2))
 print("Accepted matches:", len(matches))
@@ -269,6 +284,22 @@ def ransac_homography(src_pts, dst_pts, N=1000, threshold=5.0):
         # Step 2: Fit a homography to the sample
         H = estimate_homography(sample_src, sample_dst)
 
+        h, w = 1084, 1434  # Image 1 dimensions
+        corners = np.array([
+            [0, 0, 1],
+            [w - 1, 0, 1],
+            [w - 1, h - 1, 1],
+            [0, h - 1, 1]
+        ], dtype=float)
+
+        projected_h = (H @ corners.T).T
+        denominators = projected_h[:, 2]
+
+        # Since H[2, 2] is normalized to 1, all four
+        # denominators should stay safely positive.
+        if np.any(denominators < 0.1):
+            continue
+
         # Map all source points using the hypothesized homography
         src_hom = np.column_stack(
             (src_pts, np.ones(len(src_pts)))
@@ -326,6 +357,18 @@ print("Homography:")
 print(H)
 print("Number of matches:", len(src_pts))
 print("Number of inliers:", np.sum(inliers))
+
+width, height = img1.size
+
+corners = np.array([
+    [0, 0, 1],
+    [width - 1, 0, 1],
+    [width - 1, height - 1, 1],
+    [0, height - 1, 1]
+], dtype=float)
+
+print("Homography denominators at image corners:")
+print((H @ corners.T).T[:, 2])
 
 inlier_matches = [
     match
