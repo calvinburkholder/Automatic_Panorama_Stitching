@@ -18,7 +18,6 @@ def detect_features(image):
 
 
 def pairwise_distances(a, b):
-    """Euclidean distance between every row of a and every row of b."""
     a2 = np.sum(a ** 2, axis=1)[:, None]
     b2 = np.sum(b ** 2, axis=1)[None, :]
     d2 = np.maximum(a2 + b2 - 2.0 * (a @ b.T), 0.0)
@@ -26,10 +25,6 @@ def pairwise_distances(a, b):
 
 
 def match_descriptors(desc1, desc2, r):
-    """
-    Ratio test (d1/d2 < r) in the forward direction, plus a
-    mutual-nearest-neighbour check in the reverse direction.
-    """
     if desc1 is None or desc2 is None:
         return []
     if len(desc1) < 2 or len(desc2) < 2:
@@ -40,7 +35,7 @@ def match_descriptors(desc1, desc2, r):
     desc1 = desc1.astype(dtype)
     desc2 = desc2.astype(dtype)
 
-    D = pairwise_distances(desc1, desc2)  # (n1, n2)
+    D = pairwise_distances(desc1, desc2)
 
     two = np.argpartition(D, 1, axis=1)[:, :2]
     rows = np.arange(len(desc1))
@@ -107,7 +102,6 @@ def visualize_matches(img1, kp1, img2, kp2, matches,
 # ---------------------------------------------------------------------------
 
 def estimate_affine(source, target):
-    """Least-squares affine transform from source points to target points."""
     source = np.asarray(source, dtype=float)
     target = np.asarray(target, dtype=float)
 
@@ -132,7 +126,6 @@ def estimate_affine(source, target):
 
 
 def estimate_homography(source, target):
-    """Normalized DLT homography estimate using SVD."""
     source = np.asarray(source, dtype=float)
     target = np.asarray(target, dtype=float)
 
@@ -177,7 +170,6 @@ def estimate_homography(source, target):
 
 
 def apply_transform(points, H):
-    """Apply a 3x3 matrix to Nx2 points. Returns (Nx2 points, w values)."""
     points = np.asarray(points, dtype=float)
     ph = (H @ np.column_stack([points, np.ones(len(points))]).T).T
     w = ph[:, 2]
@@ -241,7 +233,6 @@ def is_reasonable_transform(H, image_shape, max_w_ratio=5.0,
 
 
 def sample_is_degenerate(points, min_area=1.0):
-    """True if any three of the sampled points are (nearly) collinear."""
     n = len(points)
     for i in range(n):
         for j in range(i + 1, n):
@@ -255,7 +246,6 @@ def sample_is_degenerate(points, min_area=1.0):
 
 
 def compute_inliers(H, src_pts, dst_pts, threshold):
-    """Symmetric transfer error: forward in image 2 and backward in image 1."""
     forward, _ = apply_transform(src_pts, H)
     try:
         H_inv = np.linalg.inv(H)
@@ -272,10 +262,6 @@ def compute_inliers(H, src_pts, dst_pts, threshold):
 
 def ransac_transform(src_pts, dst_pts, image_shape, model="homography",
                      N=2000, threshold=5.0, seed=None):
-    """
-    RANSAC for 'homography' (4-point samples) or 'affine' (3-point samples).
-    image_shape is (width, height) of image 1, used for sanity checks.
-    """
     if model == "homography":
         k, fit = 4, estimate_homography
     elif model == "affine":
@@ -318,8 +304,6 @@ def ransac_transform(src_pts, dst_pts, image_shape, model="homography",
     if best_H is None or best_count < k:
         raise ValueError("RANSAC could not find a valid %s." % model)
 
-    # Refit on all inliers (re-estimate a couple of times as the set grows),
-    # but only accept the refit if it is still a sane transform.
     for _ in range(3):
         try:
             refit = fit(src_pts[best_inliers], dst_pts[best_inliers])
@@ -341,12 +325,6 @@ def ransac_transform(src_pts, dst_pts, image_shape, model="homography",
 # ---------------------------------------------------------------------------
 
 def warp_image(image, H, output_width, output_height, chunk_rows=64):
-    """
-    Inverse-warp a PIL image onto the output canvas. H maps source
-    coordinates to canvas coordinates. Processed in row chunks with
-    float32 so large canvases do not exhaust memory.
-    Returns warped RGB float32 array, coverage mask, feathering weights.
-    """
     image = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
     height, width = image.shape[:2]
 
@@ -415,12 +393,6 @@ def corners_of(img):
 
 def construct_panorama_multi(images, transforms, max_pixels=25_000_000,
                              raw_limit=300_000_000):
-    """
-    Blend any number of images. transforms[i] maps image i into the
-    reference coordinate system. Weighted (feathered) blending is done
-    with accumulators so only one warped image is in memory at a time.
-    If the canvas would exceed max_pixels it is uniformly downscaled.
-    """
     mapped_corners = []
     for k, (img, H) in enumerate(zip(images, transforms)):
         mapped, w = apply_transform(corners_of(img), H)
@@ -500,7 +472,6 @@ def normalize_matrix(H):
 
 
 def estimate_pairwise(images, keypoints, descriptors, model, args):
-    """Return [H_0->1, H_1->2, ...]; each maps image i into image i+1."""
     pair_transforms = []
     for i in range(len(images) - 1):
         matches = match_descriptors(descriptors[i], descriptors[i + 1], args.ratio)
@@ -531,10 +502,6 @@ def estimate_pairwise(images, keypoints, descriptors, model, args):
 
 
 def compose_to_reference(pair_transforms, ref):
-    """
-    Given H_k = (image k -> image k+1), return list T where T[i] maps
-    image i into the coordinate system of image `ref`.
-    """
     m = len(pair_transforms) + 1
     T = [None] * m
     T[ref] = np.eye(3)
@@ -579,23 +546,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="Stitch an ordered sequence of overlapping images."
     )
-    parser.add_argument("images", nargs="*",
-                        help="images in left-to-right order")
-    parser.add_argument("--dir", default=None,
-                        help="folder of images; used in alphabetical order")
-    parser.add_argument("--ratio", type=float, default=0.75,
-                        help="ratio-test threshold r")
+    parser.add_argument("images", nargs="*", help="images in left-to-right order")
+    parser.add_argument("--dir", default=None, help="folder of images; used in alphabetical order")
+    parser.add_argument("--ratio", type=float, default=0.75, help="ratio-test threshold r")
     parser.add_argument("--iters", type=int, default=2000, help="RANSAC iterations")
-    parser.add_argument("--threshold", type=float, default=5.0,
-                        help="RANSAC inlier threshold (pixels)")
-    parser.add_argument("--model", choices=["homography", "affine", "both"],
-                        default="both")
-    parser.add_argument("--ref", type=int, default=None,
-                        help="reference image index (default: middle image)")
-    parser.add_argument("--max_dim", type=int, default=1600,
-                        help="downscale inputs so the long side is at most this (0 = off)")
-    parser.add_argument("--output", default="panorama",
-                        help="output filename prefix")
+    parser.add_argument("--threshold", type=float, default=5.0, help="RANSAC inlier threshold (pixels)")
+    parser.add_argument("--model", choices=["homography", "affine", "both"], default="both")
+    parser.add_argument("--ref", type=int, default=None, help="reference image index (default: middle image)")
+    parser.add_argument("--max_dim", type=int, default=1600, help="downscale inputs so the long side is at most this (0 = off)")
+    parser.add_argument("--output", default="panorama", help="output filename prefix")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
