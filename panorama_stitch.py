@@ -1,18 +1,14 @@
 from __future__ import print_function
-from builtins import range
-import os
 import argparse
- 
+
 import numpy as np
 from PIL import Image, ImageDraw
-from skimage import color
-import matplotlib.pyplot as plt
-
 import cv2
- 
-plt.rcParams['figure.figsize'] = (10.0, 8.0)
-plt.rcParams['image.interpolation'] = 'nearest'
-plt.rcParams['image.cmap'] = 'gray'
+
+
+# ---------------------------------------------------------------------------
+# Part 1: Feature detection and matching
+# ---------------------------------------------------------------------------
 
 def detect_features(image):
     gray_image = np.array(image.convert("L"))
@@ -21,164 +17,122 @@ def detect_features(image):
     return keypoints, descriptors
 
 
+def pairwise_distances(a, b):
+    """Euclidean distance between every row of a and every row of b."""
+    a2 = np.sum(a ** 2, axis=1)[:, None]
+    b2 = np.sum(b ** 2, axis=1)[None, :]
+    d2 = np.maximum(a2 + b2 - 2.0 * (a @ b.T), 0.0)
+    return np.sqrt(d2)
+
+
 def match_descriptors(desc1, desc2, r):
+    """
+    Ratio test (d1/d2 < r) in the forward direction, plus a
+    mutual-nearest-neighbour check in the reverse direction.
+    """
     if desc1 is None or desc2 is None:
         return []
-
     if len(desc1) < 2 or len(desc2) < 2:
         return []
 
-    # Find the two nearest neighbors in image 2 for each descriptor in image 1.
-    forward_matches = {}
+    # float32 for big descriptor sets keeps the distance matrix manageable
+    dtype = np.float64 if len(desc1) * len(desc2) <= 20_000_000 else np.float32
+    desc1 = desc1.astype(dtype)
+    desc2 = desc2.astype(dtype)
 
-    for i, descriptor1 in enumerate(desc1):
-        distances = np.linalg.norm(desc2 - descriptor1, axis=1)
-        nearest = np.argsort(distances)[:2]
+    D = pairwise_distances(desc1, desc2)  # (n1, n2)
 
-        first_idx, second_idx = nearest
-        d1 = distances[first_idx]
-        d2 = distances[second_idx]
+    two = np.argpartition(D, 1, axis=1)[:, :2]
+    rows = np.arange(len(desc1))
+    da = D[rows, two[:, 0]]
+    db = D[rows, two[:, 1]]
+    swap = db < da
+    first = np.where(swap, two[:, 1], two[:, 0])
+    d1 = np.where(swap, db, da)
+    d2 = np.where(swap, da, db)
 
-        if d2 > 0 and d1 / d2 < r:
-            forward_matches[i] = int(first_idx)
+    reverse_best = np.argmin(D, axis=0)
 
-    # Find each descriptor in image 2's nearest descriptor in image 1.
-    reverse_best = {}
-
-    for j, descriptor2 in enumerate(desc2):
-        distances = np.linalg.norm(desc1 - descriptor2, axis=1)
-        reverse_best[j] = int(np.argmin(distances))
-
-    # Keep only matches that agree in both directions.
     matches = []
-
-    for i, j in forward_matches.items():
-        if reverse_best[j] == i:
-            distance = float(np.linalg.norm(desc1[i] - desc2[j]))
-            matches.append(
-                cv2.DMatch(
-                    _queryIdx=i,
-                    _trainIdx=j,
-                    _distance=distance
+    for i in range(len(desc1)):
+        if d2[i] > 0 and d1[i] / d2[i] < r:
+            j = int(first[i])
+            if reverse_best[j] == i:
+                matches.append(
+                    cv2.DMatch(_queryIdx=i, _trainIdx=j, _distance=float(d1[i]))
                 )
-            )
-
     return matches
 
-def visualize_matches(img1, kp1, img2, kp2, matches):
+
+def visualize_matches(img1, kp1, img2, kp2, matches,
+                      outlier_matches=None, filename="matches_visualized.png"):
+    """Inliers (matches) are drawn green, outliers red."""
     img1 = img1.convert("RGB")
     img2 = img2.convert("RGB")
 
     width1, height1 = img1.size
     width2, height2 = img2.size
 
-    # Create a canvas wide enough for both images.
     output = Image.new(
-        "RGB",
-        (width1 + width2, max(height1, height2)),
-        (255, 255, 255)
+        "RGB", (width1 + width2, max(height1, height2)), (255, 255, 255)
     )
-
-    # Place both images on the canvas.
     output.paste(img1, (0, 0))
     output.paste(img2, (width1, 0))
-
-    # Create a drawing object.
     draw = ImageDraw.Draw(output)
 
-    for match in matches:
-        # Get the keypoint coordinates.
-        x1, y1 = kp1[match.queryIdx].pt
-        x2, y2 = kp2[match.trainIdx].pt
-
-        # Shift image 2's coordinates to the right side of the canvas.
-        x2 += width1
-
-        # Draw a line connecting corresponding keypoints.
-        draw.line(
-            [(int(x1), int(y1)), (int(x2), int(y2))],
-            fill=(0, 255, 0),
-            width=1
-        )
-
-        # Draw circles at both keypoints.
+    def draw_set(match_list, line_color, dot_color):
         radius = 3
+        for match in match_list:
+            x1, y1 = kp1[match.queryIdx].pt
+            x2, y2 = kp2[match.trainIdx].pt
+            x2 += width1
+            draw.line([(int(x1), int(y1)), (int(x2), int(y2))],
+                      fill=line_color, width=1)
+            for (cx, cy) in ((x1, y1), (x2, y2)):
+                draw.ellipse(
+                    (int(cx) - radius, int(cy) - radius,
+                     int(cx) + radius, int(cy) + radius),
+                    fill=dot_color
+                )
 
-        draw.ellipse(
-            (int(x1) - radius, int(y1) - radius,
-             int(x1) + radius, int(y1) + radius),
-            fill=(255, 0, 0)
-        )
+    if outlier_matches:
+        draw_set(outlier_matches, (255, 0, 0), (255, 128, 0))
+    draw_set(matches, (0, 255, 0), (0, 0, 255))
 
-        draw.ellipse(
-            (int(x2) - radius, int(y2) - radius,
-             int(x2) + radius, int(y2) + radius),
-            fill=(255, 0, 0)
-        )
-
-    # Save the visualization using PIL.
-    output.save("matches_visualized.png")
+    output.save(filename)
 
 
-img1 = Image.open("Project2_SampleImages/dvd_left.png")
-img2 = Image.open("Project2_SampleImages/dvd_right.png")
+# ---------------------------------------------------------------------------
+# Part 2: Geometric transformations (both map image 1 -> image 2)
+# ---------------------------------------------------------------------------
 
-kp1, desc1 = detect_features(img1)
-kp2, desc2 = detect_features(img2)
+def estimate_affine(source, target):
+    """Least-squares affine transform from source points to target points."""
+    source = np.asarray(source, dtype=float)
+    target = np.asarray(target, dtype=float)
 
-matches = match_descriptors(desc1, desc2, .6)
-print("Keypoints in image 1:", len(kp1))
-print("Keypoints in image 2:", len(kp2))
-print("Accepted matches:", len(matches))
-
-# visualize_matches(img1, kp1, img2, kp2, matches)
-
-def estimate_affine(kp1, kp2, matches):
-    if len(matches) < 3:
+    if len(source) < 3:
         raise ValueError("At least 3 matches are required.")
 
     A = []
     B = []
-
-    for match in matches:
-        x1, y1 = kp1[match.queryIdx].pt
-        x2, y2 = kp2[match.trainIdx].pt
-
+    for (x1, y1), (x2, y2) in zip(source, target):
         A.append([x1, y1, 1, 0, 0, 0])
         A.append([0, 0, 0, x1, y1, 1])
-
         B.append(x2)
         B.append(y2)
 
-    A = np.array(A, dtype=float)
-    B = np.array(B, dtype=float)
-
-    params, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
-
+    params, _, _, _ = np.linalg.lstsq(
+        np.array(A, dtype=float), np.array(B, dtype=float), rcond=None
+    )
     a, b, c, d, e, f = params
+    return np.array([[a, b, c],
+                     [d, e, f],
+                     [0, 0, 1]], dtype=float)
 
-    H = np.array([
-        [a, b, c],
-        [d, e, f],
-        [0, 0, 1]
-    ])
-
-    return H
-
-
-# def apply_affine(points, H):
-#     num_points = len(points)
-#     homogeneous_points = np.zeros((3, num_points))
-
-#     for i in range(num_points):
-#         homogeneous_points[0, i] = points[i,0]
-#         homogeneous_points[1, i] = points[i,1]
-#         homogeneous_points[2, i] = 1
-
-#     transformed = H @ homogeneous_points
-#     return transformed[:2, :].T
 
 def estimate_homography(source, target):
+    """Normalized DLT homography estimate using SVD."""
     source = np.asarray(source, dtype=float)
     target = np.asarray(target, dtype=float)
 
@@ -188,382 +142,496 @@ def estimate_homography(source, target):
     def normalize_points(points):
         center = np.mean(points, axis=0)
         centered = points - center
-
-        mean_distance = np.mean(
-            np.linalg.norm(centered, axis=1)
-        )
-
+        mean_distance = np.mean(np.linalg.norm(centered, axis=1))
         if mean_distance < 1e-10:
             raise ValueError("Degenerate point configuration.")
-
         scale = np.sqrt(2) / mean_distance
-
         T = np.array([
             [scale, 0, -scale * center[0]],
             [0, scale, -scale * center[1]],
             [0, 0, 1]
         ])
-
-        points_h = np.column_stack([
-            points, np.ones(len(points))
-        ])
-
+        points_h = np.column_stack([points, np.ones(len(points))])
         normalized_h = (T @ points_h.T).T
-        normalized = (
-            normalized_h[:, :2] / normalized_h[:, 2:3]
-        )
-
-        return normalized, T
+        return normalized_h[:, :2] / normalized_h[:, 2:3], T
 
     src_norm, T_src = normalize_points(source)
     dst_norm, T_dst = normalize_points(target)
 
     A = []
-
     for (x, y), (xp, yp) in zip(src_norm, dst_norm):
-        A.append([
-            -x, -y, -1,
-            0, 0, 0,
-            x * xp, y * xp, xp
-        ])
-
-        A.append([
-            0, 0, 0,
-            -x, -y, -1,
-            x * yp, y * yp, yp
-        ])
-
+        A.append([-x, -y, -1, 0, 0, 0, x * xp, y * xp, xp])
+        A.append([0, 0, 0, -x, -y, -1, x * yp, y * yp, yp])
     A = np.asarray(A)
 
     _, _, Vt = np.linalg.svd(A, full_matrices=True)
     H_norm = Vt[-1].reshape(3, 3)
 
-    # Convert from normalized coordinates back to pixel coordinates.
     H = np.linalg.inv(T_dst) @ H_norm @ T_src
 
-    # Normalize the matrix for easier inspection.
     if abs(H[2, 2]) > 1e-10:
         H = H / H[2, 2]
     else:
         H = H / np.linalg.norm(H)
-
     return H
 
-# def apply_homography(points, H):
-#     num_points = len(points)
-#     homogeneous_points = np.zeros((3, num_points))
 
-#     for i in range(num_points):
-#         homogeneous_points[0, i] = points[i,0]
-#         homogeneous_points[1, i] = points[i,1]
-#         homogeneous_points[2, i] = 1
+def apply_transform(points, H):
+    """Apply a 3x3 matrix to Nx2 points. Returns (Nx2 points, w values)."""
+    points = np.asarray(points, dtype=float)
+    ph = (H @ np.column_stack([points, np.ones(len(points))]).T).T
+    w = ph[:, 2]
+    out = np.full((len(points), 2), np.inf)
+    ok = np.abs(w) > 1e-10
+    out[ok] = ph[ok, :2] / w[ok, None]
+    return out, w
 
-#     transformed = H @ homogeneous_points
-#     new_points = np.zeros((num_points, 2))
-#     for i in range(num_points):
-#         new_points[i, 0] = transformed[0,i] / transformed[2,i]
-#         new_points[i, 1] = transformed[1,i] / transformed[2,i]
 
-#     return new_points
+# ---------------------------------------------------------------------------
+# Part 3: RANSAC
+# ---------------------------------------------------------------------------
 
-def ransac_homography(src_pts, dst_pts, N=1000, threshold=5.0):
+def polygon_area(poly):
+    x, y = poly[:, 0], poly[:, 1]
+    return 0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def is_convex(poly):
+    signs = []
+    n = len(poly)
+    for i in range(n):
+        a, b, c = poly[i], poly[(i + 1) % n], poly[(i + 2) % n]
+        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+        signs.append(cross)
+    signs = np.array(signs)
+    return np.all(signs > 0) or np.all(signs < 0)
+
+
+def is_reasonable_transform(H, image_shape, max_w_ratio=5.0,
+                            min_area_ratio=0.1, max_area_ratio=10.0):
     """
-    Estimate a homography using RANSAC.
+    Reject wildly implausible transforms: corners that go near/behind the
+    plane at infinity, flip the image, or blow it up / collapse it.
+    image_shape is (width, height) of the source image.
     """
+    if not np.all(np.isfinite(H)):
+        return False
+
+    width, height = image_shape
+    corners = np.array([[0, 0], [width - 1, 0],
+                        [width - 1, height - 1], [0, height - 1]], dtype=float)
+
+    mapped, w = apply_transform(corners, H)
+
+    if not np.all(np.isfinite(mapped)):
+        return False
+    if np.any(w <= 0):
+        return False
+    if w.max() / w.min() > max_w_ratio:
+        return False
+    if not is_convex(mapped):
+        return False
+
+    src_area = polygon_area(corners)
+    dst_area = polygon_area(mapped)
+    if dst_area * src_area <= 0:  # orientation flip (reflection)
+        return False
+    ratio = abs(dst_area) / abs(src_area)
+    return min_area_ratio < ratio < max_area_ratio
+
+
+def sample_is_degenerate(points, min_area=1.0):
+    """True if any three of the sampled points are (nearly) collinear."""
+    n = len(points)
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(j + 1, n):
+                a, b, c = points[i], points[j], points[k]
+                area = 0.5 * abs((b[0] - a[0]) * (c[1] - a[1])
+                                 - (b[1] - a[1]) * (c[0] - a[0]))
+                if area < min_area:
+                    return True
+    return False
+
+
+def compute_inliers(H, src_pts, dst_pts, threshold):
+    """Symmetric transfer error: forward in image 2 and backward in image 1."""
+    forward, _ = apply_transform(src_pts, H)
+    try:
+        H_inv = np.linalg.inv(H)
+    except np.linalg.LinAlgError:
+        return np.zeros(len(src_pts), dtype=bool), np.full(len(src_pts), np.inf)
+    backward, _ = apply_transform(dst_pts, H_inv)
+
+    err_f = np.linalg.norm(forward - dst_pts, axis=1)
+    err_b = np.linalg.norm(backward - src_pts, axis=1)
+    errors = np.maximum(err_f, err_b)
+    errors[~np.isfinite(errors)] = np.inf
+    return errors < threshold, errors
+
+
+def ransac_transform(src_pts, dst_pts, image_shape, model="homography",
+                     N=2000, threshold=5.0, seed=None):
+    """
+    RANSAC for 'homography' (4-point samples) or 'affine' (3-point samples).
+    image_shape is (width, height) of image 1, used for sanity checks.
+    """
+    if model == "homography":
+        k, fit = 4, estimate_homography
+    elif model == "affine":
+        k, fit = 3, estimate_affine
+    else:
+        raise ValueError("model must be 'homography' or 'affine'")
+
+    if len(src_pts) < k:
+        raise ValueError("Not enough matches for model '%s'." % model)
+
+    rng = np.random.default_rng(seed)
     best_H = None
     best_inliers = None
     best_count = 0
 
-    # Step 1: Randomly choose 4 point correspondences
     for _ in range(N):
-        indices = np.random.choice(len(src_pts), 4, replace=False)
+        idx = rng.choice(len(src_pts), k, replace=False)
+        sample_src = src_pts[idx]
+        sample_dst = dst_pts[idx]
 
-        sample_src = src_pts[indices]
-        sample_dst = dst_pts[indices]
-
-        # Step 2: Fit a homography to the sample
-        H = estimate_homography(sample_src, sample_dst)
-
-        h, w = 1084, 1434  # Image 1 dimensions
-        corners = np.array([
-            [0, 0, 1],
-            [w - 1, 0, 1],
-            [w - 1, h - 1, 1],
-            [0, h - 1, 1]
-        ], dtype=float)
-
-        projected_h = (H @ corners.T).T
-        denominators = projected_h[:, 2]
-
-        # Since H[2, 2] is normalized to 1, all four
-        # denominators should stay safely positive.
-        if np.any(denominators < 0.1):
+        if sample_is_degenerate(sample_src) or sample_is_degenerate(sample_dst):
             continue
 
-        # Map all source points using the hypothesized homography
-        src_hom = np.column_stack(
-            (src_pts, np.ones(len(src_pts)))
-        )
-        projected_hom = (H @ src_hom.T).T
+        try:
+            H = fit(sample_src, sample_dst)
+        except (ValueError, np.linalg.LinAlgError):
+            continue
 
-        # Convert homogeneous coordinates to (x, y)
-        denom = projected_hom[:, 2]
-        valid = np.abs(denom) > 1e-10
+        if not is_reasonable_transform(H, image_shape):
+            continue
 
-        projected = np.full_like(dst_pts, np.inf, dtype=float)
-        projected[valid] = (
-            projected_hom[valid, :2] / denom[valid, None]
-        )
+        inliers, _ = compute_inliers(H, src_pts, dst_pts, threshold)
+        count = int(np.sum(inliers))
 
-        # Step 3: Count the inliers
-        errors = np.linalg.norm(projected - dst_pts, axis=1)
-        inliers = errors < threshold
-        count = np.sum(inliers)
-
-        # Step 5: Keep the hypothesis with the most inliers
         if count > best_count:
             best_count = count
             best_H = H
             best_inliers = inliers
 
-    if best_H is None or best_count < 4:
-        raise ValueError("Could not find a valid homography.")
+    if best_H is None or best_count < k:
+        raise ValueError("RANSAC could not find a valid %s." % model)
 
-    # Final step from lecture: refit using all inliers
-    best_H = estimate_homography(
-        src_pts[best_inliers],
-        dst_pts[best_inliers]
-    )
+    # Refit on all inliers (re-estimate a couple of times as the set grows),
+    # but only accept the refit if it is still a sane transform.
+    for _ in range(3):
+        try:
+            refit = fit(src_pts[best_inliers], dst_pts[best_inliers])
+        except (ValueError, np.linalg.LinAlgError):
+            break
+        if not is_reasonable_transform(refit, image_shape):
+            break
+        new_inliers, _ = compute_inliers(refit, src_pts, dst_pts, threshold)
+        if np.sum(new_inliers) < best_count:
+            break
+        best_H, best_inliers = refit, new_inliers
+        best_count = int(np.sum(new_inliers))
 
     return best_H, best_inliers
 
-src_pts = np.array(
-    [kp1[match.queryIdx].pt for match in matches],
-    dtype=float
-)
 
-dst_pts = np.array(
-    [kp2[match.trainIdx].pt for match in matches],
-    dtype=float
-)
+# ---------------------------------------------------------------------------
+# Part 4: Warping and blending
+# ---------------------------------------------------------------------------
 
-H, inliers = ransac_homography(
-    src_pts, dst_pts,
-    N=1000,
-    threshold=5.0
-)
-
-print("Homography:")
-print(H)
-print("Number of matches:", len(src_pts))
-print("Number of inliers:", np.sum(inliers))
-
-width, height = img1.size
-
-corners = np.array([
-    [0, 0, 1],
-    [width - 1, 0, 1],
-    [width - 1, height - 1, 1],
-    [0, height - 1, 1]
-], dtype=float)
-
-print("Homography denominators at image corners:")
-print((H @ corners.T).T[:, 2])
-
-inlier_matches = [
-    match
-    for match, is_inlier in zip(matches, inliers)
-    if is_inlier
-]
-
-print("Visualizing", len(inlier_matches), "inlier matches")
-
-visualize_matches(
-    img1, kp1,
-    img2, kp2,
-    inlier_matches
-)
-
-
-def warp_image(image, H, output_width, output_height):
+def warp_image(image, H, output_width, output_height, chunk_rows=64):
     """
-    Warp a PIL image into a common output canvas using H,
-    which maps source-image coordinates to canvas coordinates.
-
-    Returns:
-        warped: warped RGB image as a float array
-        mask: pixels covered by the source image
-        weights: feathering weights for blending
+    Inverse-warp a PIL image onto the output canvas. H maps source
+    coordinates to canvas coordinates. Processed in row chunks with
+    float32 so large canvases do not exhaust memory.
+    Returns warped RGB float32 array, coverage mask, feathering weights.
     """
-    image = np.asarray(image.convert("RGB"), dtype=float) / 255.0
+    image = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
     height, width = image.shape[:2]
 
-    # Inverse mapping: for each output pixel, find its source location.
     H_inv = np.linalg.inv(H)
 
-    xx, yy = np.meshgrid(
-        np.arange(output_width),
-        np.arange(output_height)
-    )
+    warped = np.zeros((output_height, output_width, 3), dtype=np.float32)
+    mask = np.zeros((output_height, output_width), dtype=bool)
+    weights = np.zeros((output_height, output_width), dtype=np.float32)
 
-    output_points = np.stack([
-        xx.ravel(),
-        yy.ravel(),
-        np.ones(output_width * output_height)
-    ])
+    col = np.arange(output_width, dtype=np.float64)
 
-    source_points = H_inv @ output_points
+    for r0 in range(0, output_height, chunk_rows):
+        r1 = min(r0 + chunk_rows, output_height)
+        rows = np.arange(r0, r1, dtype=np.float64)
 
-    denom = source_points[2]
-    valid_denom = np.abs(denom) > 1e-10
+        xx, yy = np.meshgrid(col, rows)
+        pts = np.stack([xx.ravel(), yy.ravel(), np.ones(xx.size)])
 
-    x = np.zeros_like(denom)
-    y = np.zeros_like(denom)
+        sp = H_inv @ pts
+        denom = sp[2]
+        valid_denom = np.abs(denom) > 1e-10
 
-    x[valid_denom] = source_points[0, valid_denom] / denom[valid_denom]
-    y[valid_denom] = source_points[1, valid_denom] / denom[valid_denom]
+        x = np.zeros_like(denom)
+        y = np.zeros_like(denom)
+        x[valid_denom] = sp[0, valid_denom] / denom[valid_denom]
+        y[valid_denom] = sp[1, valid_denom] / denom[valid_denom]
 
-    # Keep coordinates inside the source image.
-    valid = (
-        valid_denom
-        & (x >= 0) & (x <= width - 1)
-        & (y >= 0) & (y <= height - 1)
-    )
+        valid = (
+            valid_denom
+            & (x >= 0) & (x <= width - 1)
+            & (y >= 0) & (y <= height - 1)
+        )
 
-    # Bilinear interpolation.
-    x0 = np.floor(x).astype(int).clip(0, width - 1)
-    y0 = np.floor(y).astype(int).clip(0, height - 1)
-    x1 = np.minimum(x0 + 1, width - 1)
-    y1 = np.minimum(y0 + 1, height - 1)
+        x0 = np.floor(x).astype(int).clip(0, width - 1)
+        y0 = np.floor(y).astype(int).clip(0, height - 1)
+        x1 = np.minimum(x0 + 1, width - 1)
+        y1 = np.minimum(y0 + 1, height - 1)
 
-    dx = (x - x0)[:, None]
-    dy = (y - y0)[:, None]
+        dx = (x - x0).astype(np.float32)[:, None]
+        dy = (y - y0).astype(np.float32)[:, None]
 
-    pixels = (
-        image[y0, x0] * (1 - dx) * (1 - dy)
-        + image[y0, x1] * dx * (1 - dy)
-        + image[y1, x0] * (1 - dx) * dy
-        + image[y1, x1] * dx * dy
-    )
+        pixels = (
+            image[y0, x0] * (1 - dx) * (1 - dy)
+            + image[y0, x1] * dx * (1 - dy)
+            + image[y1, x0] * (1 - dx) * dy
+            + image[y1, x1] * dx * dy
+        )
+        pixels[~valid] = 0
 
-    pixels[~valid] = 0
+        dist = np.minimum.reduce([x, y, (width - 1) - x, (height - 1) - y])
+        w = (np.maximum(dist, 0) + 1).astype(np.float32)
+        w[~valid] = 0
 
-    warped = pixels.reshape(output_height, output_width, 3)
-    mask = valid.reshape(output_height, output_width)
-
-    # Feathering: give more weight to pixels farther from image edges.
-    distance_to_edge = np.minimum.reduce([
-        x,
-        y,
-        (width - 1) - x,
-        (height - 1) - y
-    ])
-
-    weights = np.maximum(distance_to_edge, 0) + 1
-    weights[~valid] = 0
-    weights = weights.reshape(output_height, output_width)
+        n = r1 - r0
+        warped[r0:r1] = pixels.reshape(n, output_width, 3)
+        mask[r0:r1] = valid.reshape(n, output_width)
+        weights[r0:r1] = w.reshape(n, output_width)
 
     return warped, mask, weights
 
 
-def construct_panorama(img1, img2, H):
+def corners_of(img):
+    w, h = img.size
+    return np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=float)
+
+
+def construct_panorama_multi(images, transforms, max_pixels=25_000_000,
+                             raw_limit=300_000_000):
     """
-    Construct a panorama. H maps img1 coordinates to img2 coordinates.
+    Blend any number of images. transforms[i] maps image i into the
+    reference coordinate system. Weighted (feathered) blending is done
+    with accumulators so only one warped image is in memory at a time.
+    If the canvas would exceed max_pixels it is uniformly downscaled.
     """
-    width1, height1 = img1.size
-    width2, height2 = img2.size
+    mapped_corners = []
+    for k, (img, H) in enumerate(zip(images, transforms)):
+        mapped, w = apply_transform(corners_of(img), H)
+        if np.any(w <= 0) or not np.all(np.isfinite(mapped)):
+            raise ValueError(
+                "Image %d is mapped through infinity / behind the camera. "
+                "The composed transform is not usable." % k
+            )
+        mapped_corners.append(mapped)
 
-    # Four corners of each image, in (x, y) coordinates.
-    corners1 = np.array([
-        [0, 0], [width1 - 1, 0],
-        [width1 - 1, height1 - 1], [0, height1 - 1]
-    ], dtype=float)
+    allc = np.vstack(mapped_corners)
+    min_x, min_y = np.floor(allc.min(axis=0))
+    max_x, max_y = np.ceil(allc.max(axis=0))
 
-    corners2 = np.array([
-        [0, 0], [width2 - 1, 0],
-        [width2 - 1, height2 - 1], [0, height2 - 1]
-    ], dtype=float)
+    raw_w = max_x - min_x + 1
+    raw_h = max_y - min_y + 1
+    print("Raw canvas: %d x %d (%.1f M pixels)"
+          % (raw_w, raw_h, raw_w * raw_h / 1e6))
 
-    # Transform image 1's corners into image 2's coordinate system.
-    corners1_h = np.column_stack([
-        corners1, np.ones(len(corners1))
-    ])
-    transformed_h = (H @ corners1_h.T).T
-
-    if np.any(np.abs(transformed_h[:, 2]) < 1e-10):
-        raise ValueError("Homography maps a corner to infinity.")
-
-    transformed_corners1 = (
-        transformed_h[:, :2] / transformed_h[:, 2:3]
-    )
-
-    # Find bounds containing both images.
-    all_corners = np.vstack([transformed_corners1, corners2])
-
-    min_x = int(np.floor(np.min(all_corners[:, 0])))
-    min_y = int(np.floor(np.min(all_corners[:, 1])))
-    max_x = int(np.ceil(np.max(all_corners[:, 0])))
-    max_y = int(np.ceil(np.max(all_corners[:, 1])))
-
-    output_width = max_x - min_x + 1
-    output_height = max_y - min_y + 1
-
-    print("Image 1 size:", img1.size)
-    print("Image 2 size:", img2.size)
-    print("Transformed image 1 corners:")
-    print(transformed_corners1)
-    print("Output canvas width:", output_width)
-    print("Output canvas height:", output_height)
-    print("Total output pixels:", output_width * output_height)
-
-    if output_width <= 0 or output_height <= 0:
-        raise ValueError("Invalid panorama dimensions.")
-
-    if output_width * output_height > 20_000_000:
+    if raw_w * raw_h > raw_limit:
         raise ValueError(
-        "Panorama canvas is unexpectedly large. "
-        "Check the estimated homography and transformed corners."
+            "Canvas is absurdly large - a pairwise transform is probably "
+            "bad. Check the match visualizations."
         )
 
-    # Translate the canvas so all coordinates are nonnegative.
-    T = np.array([
-        [1, 0, -min_x],
-        [0, 1, -min_y],
-        [0, 0, 1]
-    ], dtype=float)
+    scale = 1.0
+    if raw_w * raw_h > max_pixels:
+        scale = float(np.sqrt(max_pixels / (raw_w * raw_h)))
+        print("Downscaling canvas by %.3f to fit memory" % scale)
 
-    H1 = T @ H
-    H2 = T  # Image 2 already defines the reference coordinate system.
+    out_w = int(np.ceil((max_x - min_x) * scale)) + 1
+    out_h = int(np.ceil((max_y - min_y) * scale)) + 1
+    print("Output canvas: %d x %d" % (out_w, out_h))
 
-    # Warp both images onto the expanded canvas.
-    warped1, mask1, weight1 = warp_image(
-        img1, H1, output_width, output_height
+    S = np.array([[scale, 0, -min_x * scale],
+                  [0, scale, -min_y * scale],
+                  [0, 0, 1]], dtype=float)
+
+    num = np.zeros((out_h, out_w, 3), dtype=np.float32)
+    den = np.zeros((out_h, out_w), dtype=np.float32)
+
+    for k, (img, H) in enumerate(zip(images, transforms)):
+        Hc = S @ H
+        pts, _ = apply_transform(corners_of(img), Hc)
+
+        x0 = max(0, int(np.floor(pts[:, 0].min())) - 1)
+        x1 = min(out_w, int(np.ceil(pts[:, 0].max())) + 2)
+        y0 = max(0, int(np.floor(pts[:, 1].min())) - 1)
+        y1 = min(out_h, int(np.ceil(pts[:, 1].max())) + 2)
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        T = np.array([[1, 0, -x0], [0, 1, -y0], [0, 0, 1]], dtype=float)
+        warped, mask, weight = warp_image(img, T @ Hc, x1 - x0, y1 - y0)
+
+        weight = weight * mask
+        num[y0:y1, x0:x1] += warped * weight[:, :, None]
+        den[y0:y1, x0:x1] += weight
+        print("  blended image %d into region x[%d:%d] y[%d:%d]"
+              % (k, x0, x1, y0, y1))
+
+    safe = np.where(den == 0, 1, den)
+    num /= safe[:, :, None]
+    num[den == 0] = 0
+
+    return Image.fromarray(np.clip(num * 255, 0, 255).astype(np.uint8))
+
+
+# ---------------------------------------------------------------------------
+# Part 5: Multiple images
+# ---------------------------------------------------------------------------
+
+def normalize_matrix(H):
+    if abs(H[2, 2]) > 1e-10:
+        return H / H[2, 2]
+    return H / np.linalg.norm(H)
+
+
+def estimate_pairwise(images, keypoints, descriptors, model, args):
+    """Return [H_0->1, H_1->2, ...]; each maps image i into image i+1."""
+    pair_transforms = []
+    for i in range(len(images) - 1):
+        matches = match_descriptors(descriptors[i], descriptors[i + 1], args.ratio)
+        print("\nPair %d -> %d: %d matches (r=%.2f)"
+              % (i, i + 1, len(matches), args.ratio))
+
+        src_pts = np.array([keypoints[i][m.queryIdx].pt for m in matches], dtype=float)
+        dst_pts = np.array([keypoints[i + 1][m.trainIdx].pt for m in matches], dtype=float)
+
+        try:
+            H, inliers = ransac_transform(
+                src_pts, dst_pts, images[i].size, model=model,
+                N=args.iters, threshold=args.threshold, seed=args.seed
+            )
+        except ValueError as e:
+            raise ValueError("Pair %d -> %d: %s" % (i, i + 1, e))
+
+        print("  inliers: %d / %d" % (int(np.sum(inliers)), len(matches)))
+        print(np.array2string(H, precision=4, suppress_small=True))
+
+        inl = [m for m, ok in zip(matches, inliers) if ok]
+        outl = [m for m, ok in zip(matches, inliers) if not ok]
+        visualize_matches(images[i], keypoints[i], images[i + 1], keypoints[i + 1],
+                          inl, outl, "matches_%s_%d_%d.png" % (model, i, i + 1))
+
+        pair_transforms.append(H)
+    return pair_transforms
+
+
+def compose_to_reference(pair_transforms, ref):
+    """
+    Given H_k = (image k -> image k+1), return list T where T[i] maps
+    image i into the coordinate system of image `ref`.
+    """
+    m = len(pair_transforms) + 1
+    T = [None] * m
+    T[ref] = np.eye(3)
+
+    # Images left of the reference: apply H_i first, then continue rightwards.
+    for i in range(ref - 1, -1, -1):
+        T[i] = normalize_matrix(T[i + 1] @ pair_transforms[i])
+
+    # Images right of the reference: invert the chain back toward the reference.
+    for i in range(ref + 1, m):
+        T[i] = normalize_matrix(T[i - 1] @ np.linalg.inv(pair_transforms[i - 1]))
+
+    return T
+
+
+def load_images(args):
+    import glob
+    import os
+
+    paths = list(args.images)
+    if args.dir:
+        exts = ("*.png", "*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.PNG")
+        found = []
+        for e in exts:
+            found.extend(glob.glob(os.path.join(args.dir, e)))
+        paths.extend(sorted(set(found)))
+    if not paths:
+        paths = ["Project2_SampleImages/dvd_left.png",
+                 "Project2_SampleImages/dvd_right.png"]
+
+    images = []
+    for p in paths:
+        img = Image.open(p).convert("RGB")
+        if args.max_dim and max(img.size) > args.max_dim:
+            img.thumbnail((args.max_dim, args.max_dim), Image.LANCZOS)
+        print("Loaded %s  size=%s" % (p, img.size))
+        images.append(img)
+    return paths, images
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Stitch an ordered sequence of overlapping images."
     )
-    warped2, mask2, weight2 = warp_image(
-        img2, H2, output_width, output_height
-    )
+    parser.add_argument("images", nargs="*",
+                        help="images in left-to-right order")
+    parser.add_argument("--dir", default=None,
+                        help="folder of images; used in alphabetical order")
+    parser.add_argument("--ratio", type=float, default=0.75,
+                        help="ratio-test threshold r")
+    parser.add_argument("--iters", type=int, default=2000, help="RANSAC iterations")
+    parser.add_argument("--threshold", type=float, default=5.0,
+                        help="RANSAC inlier threshold (pixels)")
+    parser.add_argument("--model", choices=["homography", "affine", "both"],
+                        default="both")
+    parser.add_argument("--ref", type=int, default=None,
+                        help="reference image index (default: middle image)")
+    parser.add_argument("--max_dim", type=int, default=1600,
+                        help="downscale inputs so the long side is at most this (0 = off)")
+    parser.add_argument("--output", default="panorama",
+                        help="output filename prefix")
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
 
-    # Weighted feathering blend.
-    weight1 = weight1 * mask1
-    weight2 = weight2 * mask2
+    paths, images = load_images(args)
+    if len(images) < 2:
+        raise SystemExit("Need at least two images.")
 
-    total_weight = weight1 + weight2
-    safe_total = np.where(total_weight == 0, 1, total_weight)
+    ref = args.ref if args.ref is not None else len(images) // 2
+    if not 0 <= ref < len(images):
+        raise SystemExit("--ref must be between 0 and %d" % (len(images) - 1))
+    print("Reference image: %d (%s)" % (ref, paths[ref]))
 
-    panorama = (
-        warped1 * weight1[:, :, None]
-        + warped2 * weight2[:, :, None]
-    ) / safe_total[:, :, None]
+    keypoints, descriptors = [], []
+    for img in images:
+        kp, desc = detect_features(img)
+        keypoints.append(kp)
+        descriptors.append(desc)
+        print("Keypoints:", len(kp))
 
-    # Keep uncovered pixels black.
-    panorama[total_weight == 0] = 0
+    models = ["homography", "affine"] if args.model == "both" else [args.model]
 
-    panorama = np.clip(panorama * 255, 0, 255).astype(np.uint8)
+    for model in models:
+        print("\n==================== %s ====================" % model)
+        try:
+            pair_transforms = estimate_pairwise(images, keypoints, descriptors,
+                                                model, args)
+            to_ref = compose_to_reference(pair_transforms, ref)
+            panorama = construct_panorama_multi(images, to_ref)
+        except ValueError as e:
+            print("\n%s failed: %s" % (model, e))
+            continue
 
-    return Image.fromarray(panorama)
+        out_name = "%s_%s.png" % (args.output, model)
+        panorama.save(out_name)
+        print("Saved %s (%d x %d)" % (out_name, panorama.size[0], panorama.size[1]))
 
-panorama = construct_panorama(img1, img2, H)
-panorama.save("panorama.png")
 
-print("Saved panorama to panorama.png")
-print("Panorama dimensions:", panorama.size)
+if __name__ == "__main__":
+    main()
