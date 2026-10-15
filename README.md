@@ -90,25 +90,39 @@ How To Reproduce My Main Experiments:
 
 Image Pairing: dvd_left.png and dvd_right.png
 
-r = 0.60
+r = 0.60 |
+Matches: 85 |
+Inliers: 54 |
+% Retained: 63.53
 
-Matches: 85
-Inliers: 54
 <img src="results/matches_homography_60.png">
 
-r = 0.75
-Matches: 219
-Inliers: 70
+r = 0.75 |
+Matches: 219 |
+Inliers: 70 |
+% Retained: 31.96
+
 <img src="results/matches_homography_75.png">
 
-r = 0.90
-Matches: 489
-Inliers: 103
+r = 0.90 |
+Matches: 489 |
+Inliers: 103 |
+% Retained: 21.06
+
 <img src="results/matches_homography_90.png">
 
 --RANSAC Evaluation--
 
+
+
 --Affine versus Homography--
+
+Image Pairing: uttower1.jpg and uttower2.jpg
+
+<img src="results/uttower_affine.png">
+<img src="results/uttower_homography.png">
+
+
 
 --Multiple-Image Panorama--
 
