@@ -24,34 +24,47 @@ def pairwise_distances(a, b):
     return np.sqrt(d2)
 
 
-def match_descriptors(desc1, desc2, r):
+def match_descriptors(desc1, desc2, r, block=500):
     if desc1 is None or desc2 is None:
         return []
     if len(desc1) < 2 or len(desc2) < 2:
         return []
-
-    dtype = np.float64 if len(desc1) * len(desc2) <= 20_000_000 else np.float32
-    desc1 = desc1.astype(dtype)
-    desc2 = desc2.astype(dtype)
-
-    D = pairwise_distances(desc1, desc2)  # (n1, n2)
-
-    two = np.argpartition(D, 1, axis=1)[:, :2]
-    rows = np.arange(len(desc1))
-    da = D[rows, two[:, 0]]
-    db = D[rows, two[:, 1]]
-    swap = db < da
-    first = np.where(swap, two[:, 1], two[:, 0])
-    d1 = np.where(swap, db, da)
-    d2 = np.where(swap, da, db)
-
-    reverse_best = np.argmin(D, axis=0)
-
+ 
+    desc1 = desc1.astype(np.float64)
+    desc2 = desc2.astype(np.float64)
+    n1, n2 = len(desc1), len(desc2)
+ 
+    first = np.zeros(n1, dtype=int)
+    d1 = np.zeros(n1)
+    d2 = np.zeros(n1)
+ 
+    col_min = np.full(n2, np.inf)
+    col_arg = np.zeros(n2, dtype=int)
+ 
+    for s in range(0, n1, block):
+        e = min(s + block, n1)
+        D = pairwise_distances(desc1[s:e], desc2) 
+ 
+        two = np.argpartition(D, 1, axis=1)[:, :2]
+        rows = np.arange(e - s)
+        da = D[rows, two[:, 0]]
+        db = D[rows, two[:, 1]]
+        swap = db < da
+        first[s:e] = np.where(swap, two[:, 1], two[:, 0])
+        d1[s:e] = np.where(swap, db, da)
+        d2[s:e] = np.where(swap, da, db)
+ 
+        cm = D.min(axis=0)
+        ca = D.argmin(axis=0) + s
+        better = cm < col_min
+        col_min[better] = cm[better]
+        col_arg[better] = ca[better]
+ 
     matches = []
-    for i in range(len(desc1)):
+    for i in range(n1):
         if d2[i] > 0 and d1[i] / d2[i] < r:
             j = int(first[i])
-            if reverse_best[j] == i:
+            if col_arg[j] == i:
                 matches.append(
                     cv2.DMatch(_queryIdx=i, _trainIdx=j, _distance=float(d1[i]))
                 )
