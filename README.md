@@ -119,8 +119,11 @@ Homography Panoramas:
 Iteration Images:
 
 16/17. python3 panorama_stitch.py --dir dvd --iters 500 --model homography
+
 18/19. python3 panorama_stitch.py --dir dvd --iters 1000 --model homography
+
 20/21. python3 panorama_stitch.py --dir dvd --iters 1500 --model homography
+
 22/23. python3 panorama_stitch.py --dir dvd --iters 2000 --model homography
 
 -Affine Vs. Homography-
@@ -134,7 +137,9 @@ Iteration Images:
 
 28. python3 panorama_stitch.py --dir yosemite --model homography
 29. python3 panorama_stitch.py --dir union --model homography
+
 30/31/32: Images taken on my phone from my balconey
+
 33/34. python3 panorama_stitch.py --dir union --model homography
 
 
