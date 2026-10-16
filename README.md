@@ -119,11 +119,21 @@ Inliers: 103 |
 
 Image Pairing: uttower1.jpg and uttower2.jpg
 
+Affine:
+
 <img src="results/uttower_affine.png">
+
+Homography:
+
 <img src="results/uttower_homography.png">
 
-
-
 --Multiple-Image Panorama--
+
+Multiple Images: yosemite1.jpg, yosemite2.jpg, yosemite3.jpg, yosemite4.jpg
+
+<img src="results/yosemite_homography.png">
+
+The reference image used in this panorama is yosemite3.jpg
+
 
 --AI Declaration--
