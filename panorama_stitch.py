@@ -30,12 +30,11 @@ def match_descriptors(desc1, desc2, r):
     if len(desc1) < 2 or len(desc2) < 2:
         return []
 
-    # float32 for big descriptor sets keeps the distance matrix manageable
     dtype = np.float64 if len(desc1) * len(desc2) <= 20_000_000 else np.float32
     desc1 = desc1.astype(dtype)
     desc2 = desc2.astype(dtype)
 
-    D = pairwise_distances(desc1, desc2)
+    D = pairwise_distances(desc1, desc2)  # (n1, n2)
 
     two = np.argpartition(D, 1, axis=1)[:, :2]
     rows = np.arange(len(desc1))
@@ -201,11 +200,6 @@ def is_convex(poly):
 
 def is_reasonable_transform(H, image_shape, max_w_ratio=5.0,
                             min_area_ratio=0.1, max_area_ratio=10.0):
-    """
-    Reject wildly implausible transforms: corners that go near/behind the
-    plane at infinity, flip the image, or blow it up / collapse it.
-    image_shape is (width, height) of the source image.
-    """
     if not np.all(np.isfinite(H)):
         return False
 
@@ -226,7 +220,7 @@ def is_reasonable_transform(H, image_shape, max_w_ratio=5.0,
 
     src_area = polygon_area(corners)
     dst_area = polygon_area(mapped)
-    if dst_area * src_area <= 0:  # orientation flip (reflection)
+    if dst_area * src_area <= 0: 
         return False
     ratio = abs(dst_area) / abs(src_area)
     return min_area_ratio < ratio < max_area_ratio
@@ -471,6 +465,21 @@ def normalize_matrix(H):
     return H / np.linalg.norm(H)
 
 
+def transfer_errors(H, src_pts, dst_pts):
+    if H is None:
+        return np.full(len(src_pts), np.nan)
+    pred, _ = apply_transform(src_pts, H)
+    err = np.linalg.norm(pred - dst_pts, axis=1)
+    err[~np.isfinite(err)] = np.nan
+    return err
+
+
+def err_summary(err):
+    if err.size == 0 or np.all(np.isnan(err)):
+        return float("nan"), float("nan")
+    return float(np.nanmedian(err)), float(np.nanmean(err))
+
+
 def estimate_pairwise(images, keypoints, descriptors, model, args):
     pair_transforms = []
     for i in range(len(images) - 1):
@@ -489,7 +498,29 @@ def estimate_pairwise(images, keypoints, descriptors, model, args):
         except ValueError as e:
             raise ValueError("Pair %d -> %d: %s" % (i, i + 1, e))
 
-        print("  inliers: %d / %d" % (int(np.sum(inliers)), len(matches)))
+        n_in = int(np.sum(inliers))
+        print("  tentative matches: %d" % len(matches))
+        print("  inliers: %d / %d (%.1f%%)  outliers: %d"
+              % (n_in, len(matches), 100.0 * n_in / len(matches), len(matches) - n_in))
+
+        # Reprojection error (forward, in pixels; T maps image i -> image i+1)
+        fit = estimate_homography if model == "homography" else estimate_affine
+        try:
+            H_before = fit(src_pts, dst_pts)  # non-robust fit on ALL tentative matches
+        except (ValueError, np.linalg.LinAlgError):
+            H_before = None
+        err_before = transfer_errors(H_before, src_pts, dst_pts)
+        err_after = transfer_errors(H, src_pts, dst_pts)
+        b_med, b_mean = err_summary(err_before)
+        i_med, i_mean = err_summary(err_after[inliers])
+        a_med, a_mean = err_summary(err_after)
+        print("  reprojection error (px):")
+        print("    before RANSAC (fit on all tentative, measured on all tentative):"
+              "  median %.2f  mean %.2f" % (b_med, b_mean))
+        print("    after RANSAC  (final model, measured on inliers only):"
+              "           median %.2f  mean %.2f" % (i_med, i_mean))
+        print("    after RANSAC  (final model, measured on all tentative):"
+              "          median %.2f  mean %.2f" % (a_med, a_mean))
         print(np.array2string(H, precision=4, suppress_small=True))
 
         inl = [m for m, ok in zip(matches, inliers) if ok]
@@ -502,15 +533,14 @@ def estimate_pairwise(images, keypoints, descriptors, model, args):
 
 
 def compose_to_reference(pair_transforms, ref):
+
     m = len(pair_transforms) + 1
     T = [None] * m
     T[ref] = np.eye(3)
 
-    # Images left of the reference: apply H_i first, then continue rightwards.
     for i in range(ref - 1, -1, -1):
         T[i] = normalize_matrix(T[i + 1] @ pair_transforms[i])
 
-    # Images right of the reference: invert the chain back toward the reference.
     for i in range(ref + 1, m):
         T[i] = normalize_matrix(T[i - 1] @ np.linalg.inv(pair_transforms[i - 1]))
 
@@ -546,15 +576,23 @@ def main():
     parser = argparse.ArgumentParser(
         description="Stitch an ordered sequence of overlapping images."
     )
-    parser.add_argument("images", nargs="*", help="images in left-to-right order")
-    parser.add_argument("--dir", default=None, help="folder of images; used in alphabetical order")
-    parser.add_argument("--ratio", type=float, default=0.75, help="ratio-test threshold r")
+    parser.add_argument("images", nargs="*",
+                        help="images in left-to-right order")
+    parser.add_argument("--dir", default=None,
+                        help="folder of images; used in alphabetical order")
+    parser.add_argument("--ratio", type=float, default=0.75,
+                        help="ratio-test threshold r")
     parser.add_argument("--iters", type=int, default=2000, help="RANSAC iterations")
-    parser.add_argument("--threshold", type=float, default=5.0, help="RANSAC inlier threshold (pixels)")
-    parser.add_argument("--model", choices=["homography", "affine", "both"], default="both")
-    parser.add_argument("--ref", type=int, default=None, help="reference image index (default: middle image)")
-    parser.add_argument("--max_dim", type=int, default=1600, help="downscale inputs so the long side is at most this (0 = off)")
-    parser.add_argument("--output", default="panorama", help="output filename prefix")
+    parser.add_argument("--threshold", type=float, default=5.0,
+                        help="RANSAC inlier threshold (pixels)")
+    parser.add_argument("--model", choices=["homography", "affine", "both"],
+                        default="both")
+    parser.add_argument("--ref", type=int, default=None,
+                        help="reference image index (default: middle image)")
+    parser.add_argument("--max_dim", type=int, default=1600,
+                        help="downscale inputs so the long side is at most this (0 = off)")
+    parser.add_argument("--output", default="panorama",
+                        help="output filename prefix")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
